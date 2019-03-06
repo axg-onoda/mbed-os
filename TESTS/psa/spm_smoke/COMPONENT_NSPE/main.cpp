@@ -19,13 +19,18 @@
 #ifndef COMPONENT_PSA_SRV_IPC
 #error [NOT_SUPPORTED] SPM tests can run only on SPM-enabled targets
 #endif // COMPONENT_PSA_SRV_IPC
+
 /* -------------------------------------- Includes ----------------------------------- */
 
 #include "greentea-client/test_env.h"
 #include "unity.h"
 #include "utest.h"
 #include "psa/client.h"
-#include "psa_smoke_test_part1_ifs.h"
+#include "psa_manifest/sid.h"
+
+#if defined(TARGET_TFM)
+#include "psa/service.h"
+#endif
 
 using namespace utest::v1;
 
@@ -43,7 +48,7 @@ char msg_buf[] = CLIENT_TX_MSG;
 
 void example_main(void)
 {
-    psa_handle_t conn_handle = psa_connect(ROT_SRV1, CLIENT_MINOR_VERSION);
+    psa_handle_t conn_handle = psa_connect(SMOKE_TESTS_PART1_ROT_SRV1, CLIENT_MINOR_VERSION);
     TEST_ASSERT_MESSAGE(conn_handle > 0, "psa_connect() failed");
 
 
@@ -63,9 +68,6 @@ void example_main(void)
 
     free(response_buf);
     psa_close(conn_handle);
-
-    // Wait for psa_close to finish on server side
-    osDelay(50);
 }
 
 // --------------------------------- Test Framework ---------------------------------- */

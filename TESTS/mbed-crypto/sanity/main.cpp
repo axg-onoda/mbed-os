@@ -350,7 +350,7 @@ void test_crypto_key_handles(void)
     TEST_ASSERT_EQUAL(PSA_SUCCESS, psa_destroy_key(key_handle));
 
     key_handle = 0;
-    TEST_ASSERT_EQUAL(PSA_ERROR_EMPTY_SLOT, psa_open_key(PSA_KEY_LIFETIME_PERSISTENT, id, &key_handle));
+    TEST_ASSERT_EQUAL(PSA_ERROR_DOES_NOT_EXIST, psa_open_key(PSA_KEY_LIFETIME_PERSISTENT, id, &key_handle));
 }
 
 void test_crypto_hash_clone(void)
@@ -438,7 +438,9 @@ utest::v1::status_t case_teardown_handler(const Case *const source, const size_t
 
 utest::v1::status_t test_setup(const size_t number_of_cases)
 {
+#ifndef NO_GREENTEA
     GREENTEA_SETUP(120, "default_auto");
+#endif
     return verbose_test_setup_handler(number_of_cases);
 }
 

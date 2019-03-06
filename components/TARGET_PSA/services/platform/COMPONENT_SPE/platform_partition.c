@@ -30,7 +30,7 @@ static psa_status_t lifecycle_get(psa_msg_t *msg)
         return PSA_DROP_CONNECTION;
     }
 
-    psa_its_status_t status = psa_platfrom_lifecycle_get_impl(&lc_state);
+    psa_status_t status = psa_platfrom_lifecycle_get_impl(&lc_state);
     if (status == PSA_SUCCESS) {
         psa_write(msg->handle, 0, &lc_state, sizeof(lc_state));
     }
@@ -52,6 +52,12 @@ static psa_status_t lifecycle_change_request(psa_msg_t *msg)
 
 }
 
+static psa_status_t system_reset_request(psa_msg_t *msg)
+{
+    (void)msg;
+    psa_system_reset_impl();
+}
+
 static void message_handler(psa_msg_t *msg, SignalHandler handler)
 {
     psa_status_t status = PSA_SUCCESS;
@@ -65,7 +71,7 @@ static void message_handler(psa_msg_t *msg, SignalHandler handler)
             break;
         }
         default: {
-            SPM_PANIC("Unexpected message type %d!", (int)(msg->type));
+            SPM_PANIC("Unexpected message type %lu!", msg->type);
             break;
         }
     }
@@ -74,17 +80,27 @@ static void message_handler(psa_msg_t *msg, SignalHandler handler)
 
 void platform_partition_entry(void *ptr)
 {
-    uint32_t signals = 0;
+    psa_signal_t signals = 0;
     psa_msg_t msg = {0};
     while (1) {
-        signals = psa_wait_any(PSA_BLOCK);
+        signals = psa_wait(PLATFORM_WAIT_ANY_SID_MSK, PSA_BLOCK);
         if ((signals & PSA_PLATFORM_LC_GET_MSK) != 0) {
-            psa_get(PSA_PLATFORM_LC_GET_MSK, &msg);
+            if (PSA_SUCCESS != psa_get(PSA_PLATFORM_LC_GET_MSK, &msg)) {
+                continue;
+            }
             message_handler(&msg, lifecycle_get);
         }
         if ((signals & PSA_PLATFORM_LC_SET_MSK) != 0) {
-            psa_get(PSA_PLATFORM_LC_SET_MSK, &msg);
+            if (PSA_SUCCESS != psa_get(PSA_PLATFORM_LC_SET_MSK, &msg)) {
+                continue;
+            }
             message_handler(&msg, lifecycle_change_request);
+        }
+        if ((signals & PSA_PLATFORM_SYSTEM_RESET_MSK) != 0) {
+            if (PSA_SUCCESS != psa_get(PSA_PLATFORM_SYSTEM_RESET_MSK, &msg)) {
+                continue;
+            }
+            message_handler(&msg, system_reset_request);
         }
     }
 }

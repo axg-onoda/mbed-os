@@ -28,7 +28,7 @@ void fill_tx_buffer_ascii(char *buff, size_t len);
 nsapi_error_t tlssocket_connect_to_echo_srv(TLSSocket &sock);
 nsapi_error_t tlssocket_connect_to_discard_srv(TLSSocket &sock);
 
-#if MBED_CONF_NSAPI_SOCKET_STATS_ENABLE
+#if MBED_CONF_NSAPI_SOCKET_STATS_ENABLED
 extern mbed_stats_socket_t tls_stats[MBED_CONF_NSAPI_SOCKET_STATS_MAX_COUNT];
 int fetch_stats(void);
 #endif
@@ -39,7 +39,11 @@ int fetch_stats(void);
 int split2half_rmng_tls_test_time(); // [s]
 
 namespace tls_global {
+#ifdef MBED_GREENTEA_TEST_TLSSOCKET_TIMEOUT_S
+static const int TESTS_TIMEOUT = MBED_GREENTEA_TEST_TLSSOCKET_TIMEOUT_S;
+#else
 static const int TESTS_TIMEOUT = (10 * 60);
+#endif
 static const int TLS_OS_STACK_SIZE = 2048;
 
 static const int RX_BUFF_SIZE = 1220;

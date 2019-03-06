@@ -37,7 +37,8 @@ using namespace mbed_cellular_util;
 #define PROCESS_URC_TIME 20
 
 // Suppress logging of very big packet payloads, maxlen is approximate due to write/read are cached
-#define DEBUG_MAXLEN 80
+#define DEBUG_MAXLEN 60
+#define DEBUG_END_MARK "..\r"
 
 const char *mbed::OK = "OK\r\n";
 const uint8_t OK_LENGTH = 4;
@@ -272,6 +273,7 @@ nsapi_error_t ATHandler::unlock_return_error()
 
 void ATHandler::set_at_timeout(uint32_t timeout_milliseconds, bool default_timeout)
 {
+    lock();
     if (default_timeout) {
         _previous_at_timeout = timeout_milliseconds;
         _at_timeout = timeout_milliseconds;
@@ -279,13 +281,16 @@ void ATHandler::set_at_timeout(uint32_t timeout_milliseconds, bool default_timeo
         _previous_at_timeout = _at_timeout;
         _at_timeout = timeout_milliseconds;
     }
+    unlock();
 }
 
 void ATHandler::restore_at_timeout()
 {
+    lock();
     if (_previous_at_timeout != _at_timeout) {
         _at_timeout = _previous_at_timeout;
     }
+    unlock();
 }
 
 void ATHandler::process_oob()
@@ -463,7 +468,7 @@ ssize_t ATHandler::read_bytes(uint8_t *buf, size_t len)
         }
         buf[read_len] = c;
         if (_debug_on && read_len >= DEBUG_MAXLEN) {
-            debug_print("..", sizeof(".."));
+            debug_print(DEBUG_END_MARK, sizeof(DEBUG_END_MARK) - 1);
             _debug_on = false;
         }
     }
@@ -555,8 +560,14 @@ ssize_t ATHandler::read_hex_string(char *buf, size_t size)
     size_t buf_idx = 0;
     char hexbuf[2];
 
+    bool debug_on = _debug_on;
     for (; read_idx < size * 2 + match_pos; read_idx++) {
         int c = get_char();
+
+        if (_debug_on && read_idx >= DEBUG_MAXLEN) {
+            debug_print(DEBUG_END_MARK, sizeof(DEBUG_END_MARK) - 1);
+            _debug_on = false;
+        }
 
         if (match_pos) {
             buf_idx++;
@@ -595,6 +606,7 @@ ssize_t ATHandler::read_hex_string(char *buf, size_t size)
             }
         }
     }
+    _debug_on = debug_on;
 
     if (read_idx && (read_idx == size * 2 + match_pos)) {
         buf_idx++;
@@ -1168,7 +1180,7 @@ size_t ATHandler::write(const void *data, size_t len)
             if (write_len + ret < DEBUG_MAXLEN) {
                 debug_print((char *)data + write_len, ret);
             } else {
-                debug_print("..", sizeof(".."));
+                debug_print(DEBUG_END_MARK, sizeof(DEBUG_END_MARK) - 1);
                 _debug_on = false;
             }
         }
@@ -1228,7 +1240,7 @@ void ATHandler::debug_print(const char *p, int len)
                     debug("\n");
                 } else if (c == '\n') {
                 } else {
-                    debug("[%d]", c);
+                    debug("#%02x", c);
                 }
             } else {
                 debug("%c", c);
@@ -1244,22 +1256,27 @@ void ATHandler::debug_print(const char *p, int len)
 bool ATHandler::sync(int timeout_ms)
 {
     tr_debug("AT sync");
+    lock();
+    uint32_t timeout = _at_timeout;
+    _at_timeout = timeout_ms;
     // poll for 10 seconds
     for (int i = 0; i < 10; i++) {
-        lock();
-        set_at_timeout(timeout_ms, false);
         // For sync use an AT command that is supported by all modems and likely not used frequently,
         // especially a common response like OK could be response to previous request.
+        clear_error();
+        _start_time = rtos::Kernel::get_ms_count();
         cmd_start("AT+CMEE?");
         cmd_stop();
         resp_start("+CMEE:");
         resp_stop();
-        restore_at_timeout();
-        unlock();
         if (!_last_err) {
+            _at_timeout = timeout;
+            unlock();
             return true;
         }
     }
     tr_error("AT sync failed");
+    _at_timeout = timeout;
+    unlock();
     return false;
 }

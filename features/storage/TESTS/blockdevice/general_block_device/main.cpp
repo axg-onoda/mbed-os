@@ -51,7 +51,8 @@ using namespace utest::v1;
 
 #define TEST_BLOCK_COUNT 10
 #define TEST_ERROR_MASK 16
-#define TEST_NUM_OF_THREADS 5
+#define TEST_NUM_OF_THREADS 4
+#define TEST_THREAD_STACK_SIZE 1024
 
 const struct {
     const char *name;
@@ -183,7 +184,7 @@ static BlockDevice *get_bd_instance(uint8_t bd_type)
 // Mutex is also protecting printouts for clear logs.
 // Mutex is NOT protecting Block Device actions: erase/program/read - which is the purpose of the multithreaded test!
 void basic_erase_program_read_test(BlockDevice *block_device, bd_size_t block_size, uint8_t *write_block,
-                                   uint8_t *read_block, unsigned addrwidth)
+                                   uint8_t *read_block, unsigned addrwidth, int thread_num)
 {
     int err = 0;
     _mutex->lock();
@@ -193,7 +194,13 @@ void basic_erase_program_read_test(BlockDevice *block_device, bd_size_t block_si
     srand(block_seed++);
 
     // Find a random block
-    bd_addr_t block = (rand() * block_size) % (block_device->size());
+    int threaded_rand_number = (rand() * TEST_NUM_OF_THREADS) + thread_num;
+    bd_addr_t block = (threaded_rand_number * block_size) % block_device->size();
+
+    // Flashiap boards with inconsistent sector size will not align with random start addresses
+    if (bd_arr[test_iteration] == flashiap) {
+        block = 0;
+    }
 
     // Use next random number as temporary seed to keep
     // the address progressing in the pseudorandom sequence
@@ -206,7 +213,11 @@ void basic_erase_program_read_test(BlockDevice *block_device, bd_size_t block_si
     }
     // Write, sync, and read the block
     utest_printf("test  %0*llx:%llu...\n", addrwidth, block, block_size);
-    _mutex->unlock();
+
+    // Thread test for flashiap write to the same sector, so all write/read/erase actions should be locked
+    if (bd_arr[test_iteration] != flashiap) {
+        _mutex->unlock();
+    }
 
     err = block_device->erase(block, block_size);
     TEST_ASSERT_EQUAL(0, err);
@@ -217,7 +228,10 @@ void basic_erase_program_read_test(BlockDevice *block_device, bd_size_t block_si
     err = block_device->read(read_block, block, block_size);
     TEST_ASSERT_EQUAL(0, err);
 
-    _mutex->lock();
+    if (bd_arr[test_iteration] != flashiap) {
+        _mutex->lock();
+    }
+
     // Check that the data was unmodified
     srand(seed);
     int val_rand;
@@ -276,7 +290,7 @@ void test_random_program_read_erase()
     }
 
     for (int b = 0; b < TEST_BLOCK_COUNT; b++) {
-        basic_erase_program_read_test(block_device, block_size, write_block, read_block, addrwidth);
+        basic_erase_program_read_test(block_device, block_size, write_block, read_block, addrwidth, 0);
     }
 
 end:
@@ -287,7 +301,9 @@ end:
 static void test_thread_job(void *block_device_ptr)
 {
     static int thread_num = 0;
-    thread_num++;
+    _mutex->lock();
+    int block_num = thread_num++;
+    _mutex->unlock();
     BlockDevice *block_device = (BlockDevice *)block_device_ptr;
 
     bd_size_t block_size = block_device->get_erase_size();
@@ -302,7 +318,7 @@ static void test_thread_job(void *block_device_ptr)
     }
 
     for (int b = 0; b < TEST_BLOCK_COUNT; b++) {
-        basic_erase_program_read_test(block_device, block_size, write_block, read_block, addrwidth);
+        basic_erase_program_read_test(block_device, block_size, write_block, read_block, addrwidth, block_num);
     }
 
 end:
@@ -316,10 +332,6 @@ void test_multi_threads()
 
     TEST_SKIP_UNLESS_MESSAGE(block_device != NULL, "no block device found.");
 
-    char *dummy = new (std::nothrow) char[TEST_NUM_OF_THREADS * OS_STACK_SIZE];
-    TEST_SKIP_UNLESS_MESSAGE(dummy, "Not enough memory for test.\n");
-    delete[] dummy;
-
     for (unsigned atr = 0; atr < sizeof(ATTRS) / sizeof(ATTRS[0]); atr++) {
         static const char *prefixes[] = {"", "k", "M", "G"};
         for (int i_ind = 3; i_ind >= 0; i_ind--) {
@@ -332,21 +344,44 @@ void test_multi_threads()
         }
     }
 
-    rtos::Thread bd_thread[TEST_NUM_OF_THREADS];
-
     osStatus threadStatus;
-    int i_ind;
+    int i_ind, j_ind;
+    char *dummy;
+
+    rtos::Thread **bd_thread = new (std::nothrow) rtos::Thread*[TEST_NUM_OF_THREADS];
+    TEST_SKIP_UNLESS_MESSAGE((*bd_thread) != NULL, "not enough heap to run test.");
+    memset(bd_thread, 0, TEST_NUM_OF_THREADS * sizeof(rtos::Thread *));
 
     for (i_ind = 0; i_ind < TEST_NUM_OF_THREADS; i_ind++) {
-        threadStatus = bd_thread[i_ind].start(callback(test_thread_job, (void *)block_device));
+
+        bd_thread[i_ind] = new (std::nothrow) rtos::Thread((osPriority_t)((int)osPriorityNormal), TEST_THREAD_STACK_SIZE);
+        dummy = new (std::nothrow) char[TEST_THREAD_STACK_SIZE];
+
+        if (!bd_thread[i_ind] || !dummy) {
+            utest_printf("Not enough heap to run Thread  %d !\n", i_ind + 1);
+            break;
+        }
+        delete[] dummy;
+
+        threadStatus = bd_thread[i_ind]->start(callback(test_thread_job, (void *)block_device));
         if (threadStatus != 0) {
             utest_printf("Thread %d Start Failed!\n", i_ind + 1);
+            break;
         }
     }
 
-    for (i_ind = 0; i_ind < TEST_NUM_OF_THREADS; i_ind++) {
-        bd_thread[i_ind].join();
+    for (j_ind = 0; j_ind < i_ind; j_ind++) {
+        bd_thread[j_ind]->join();
     }
+
+    if (bd_thread) {
+        for (j_ind = 0; j_ind < i_ind; j_ind++) {
+            delete bd_thread[j_ind];
+        }
+
+        delete[] bd_thread;
+    }
+
 }
 
 void test_erase_functionality()
@@ -383,6 +418,11 @@ void test_erase_functionality()
     start_address += erase_size;                 // add alignment reserve
     start_address -= start_address % erase_size; // align with erase_block
     utest_printf("start_address=0x%016" PRIx64 "\n", start_address);
+
+    // Flashiap boards with inconsistent sector size will not align with random start addresses
+    if (bd_arr[test_iteration] == flashiap) {
+        start_address = 0;
+    }
 
     // Allocate buffer for write test data
     uint8_t *data_buf = (uint8_t *)malloc(data_buf_size);
@@ -445,6 +485,11 @@ void test_contiguous_erase_write_read()
     utest_printf("\nTest Contiguous Erase/Program/Read Starts..\n");
 
     TEST_SKIP_UNLESS_MESSAGE(block_device != NULL, "no block device found.");
+
+    // Flashiap boards with inconsistent sector size will not align with random start addresses
+    if (bd_arr[test_iteration] == flashiap) {
+        return;
+    }
 
     // Test flow:
     //  1. Erase whole test area
@@ -622,6 +667,65 @@ void test_program_read_small_data_sizes()
     delete buff_block_device;
 }
 
+
+void test_unaligned_erase_blocks()
+{
+
+    utest_printf("\nTest Unaligned Erase Starts..\n");
+
+    TEST_SKIP_UNLESS_MESSAGE(block_device != NULL, "no block device found.");
+
+    TEST_SKIP_UNLESS_MESSAGE(block_device->get_erase_value() != -1, "block device has no erase functionality.");
+
+    bd_addr_t addr = 0;
+    bd_size_t sector_erase_size = block_device->get_erase_size(addr);
+    unsigned addrwidth = ceil(log(float(block_device->size() - 1)) / log(float(16))) + 1;
+
+    utest_printf("\ntest  %0*llx:%llu...", addrwidth, addr, sector_erase_size);
+
+    //unaligned start address
+    addr += 1;
+    int err = block_device->erase(addr, sector_erase_size - 1);
+    TEST_ASSERT_NOT_EQUAL(0, err);
+
+    err = block_device->erase(addr, sector_erase_size);
+    TEST_ASSERT_NOT_EQUAL(0, err);
+
+    err = block_device->erase(addr, 1);
+    TEST_ASSERT_NOT_EQUAL(0, err);
+
+    //unaligned end address
+    addr = 0;
+
+    err = block_device->erase(addr, 1);
+    TEST_ASSERT_NOT_EQUAL(0, err);
+
+    err = block_device->erase(addr, sector_erase_size + 1);
+    TEST_ASSERT_NOT_EQUAL(0, err);
+
+    //erase size exceeds flash device size
+    err = block_device->erase(addr, block_device->size() + 1);
+    TEST_ASSERT_NOT_EQUAL(0, err);
+
+    // Valid erase
+    err = block_device->erase(addr, sector_erase_size);
+    TEST_ASSERT_EQUAL(0, err);
+}
+
+void test_deinit_bd()
+{
+    utest_printf("\nTest deinit block device.\n");
+
+    test_iteration++;
+
+    TEST_SKIP_UNLESS_MESSAGE(block_device != NULL, "no block device found.");
+
+    int err = block_device->deinit();
+    TEST_ASSERT_EQUAL(0, err);
+
+    block_device = NULL;
+}
+
 void test_get_type_functionality()
 {
     utest_printf("\nTest get blockdevice type..\n");
@@ -645,20 +749,6 @@ void test_get_type_functionality()
 #endif
 }
 
-void test_deinit_bd()
-{
-    utest_printf("\nTest deinit block device.\n");
-
-    test_iteration++;
-
-    TEST_SKIP_UNLESS_MESSAGE(block_device != NULL, "no block device found.");
-
-    int err = block_device->deinit();
-    TEST_ASSERT_EQUAL(0, err);
-
-    block_device = NULL;
-}
-
 utest::v1::status_t greentea_failure_handler(const Case *const source, const failure_t reason)
 {
     greentea_case_failure_abort_handler(source, reason);
@@ -678,6 +768,7 @@ template_case_t template_cases[] = {
     {"Testing contiguous erase, write and read", test_contiguous_erase_write_read, greentea_failure_handler},
     {"Testing BlockDevice erase functionality", test_erase_functionality, greentea_failure_handler},
     {"Testing program read small data sizes", test_program_read_small_data_sizes, greentea_failure_handler},
+    {"Testing unaligned erase blocks", test_unaligned_erase_blocks, greentea_failure_handler},
     {"Testing Deinit block device", test_deinit_bd, greentea_failure_handler},
 };
 
